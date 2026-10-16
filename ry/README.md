@@ -7,7 +7,7 @@ Design notes and the deploy procedure live in the private repo RyQuantum/omnicra
 
 | File | Change | Why |
 |---|---|---|
-| `app/src/desktopMain/kotlin/com/crosspaste/paste/plugin/type/MacosBitmapImageWrite.kt` (new), one line in `DesktopImageTypePlugin.kt` | On macOS, a single image captured from a clipboard bitmap is written back as image data only, without `javaFileListFlavor` | JBR writes the file list as a second pasteboard item (`public.file-url`) and leaves `NSFilenamesPboardType` / `text/uri-list` declared but empty on the first one; Alfred then records synced screenshots as `File: <uuid>.png`. Images copied as files keep the file reference. |
+| `app/src/desktopMain/kotlin/com/crosspaste/paste/plugin/type/MacosBitmapImageWrite.kt` (new), two lines in `DesktopImageTypePlugin.kt` | On macOS, a single image captured from a clipboard bitmap is written back as its stored PNG/JPEG bytes under `public.png` / `public.jpeg` (other formats: `imageFlavor` only), without `javaFileListFlavor` | JBR writes the file list as a second pasteboard item (`public.file-url`) and leaves `NSFilenamesPboardType` / `text/uri-list` declared but empty on the first one, so Alfred records synced screenshots as `File: <uuid>.png`. With `imageFlavor`, JBR spends 50-300 ms encoding PNG/JPEG/TIFF after declaring the types and Alfred often records nothing; the stored bytes take a few ms (28 of 28 recorded in a JBR test harness, against 4 of 8 with `imageFlavor`). Images copied as files keep the file reference. |
 
 Tests: `app/src/desktopTest/kotlin/com/crosspaste/paste/plugin/type/MacosBitmapImageWriteTest.kt`.
 

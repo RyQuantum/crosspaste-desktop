@@ -224,6 +224,7 @@ class DesktopImageTypePlugin(
 
         if (fileList.size == 1) {
             val imageFile = fileList[0]
+            if (MacosBitmapImageWrite.putRawImage(platform, pasteItem, imageFile, getIdentifiers(), map)) return
             // Decoded only if a consumer asks for the image itself; most take the file. Building
             // the transferable must stay cheap: dragging a row out builds it on the UI thread.
             map[DataFlavor.imageFlavor.toPasteDataFlavor()] =
