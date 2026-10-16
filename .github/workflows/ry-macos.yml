@@ -117,6 +117,9 @@ jobs:
           security unlock-keychain -p "$kp" "$kc"
           security import "$RUNNER_TEMP/codesign.p12" -k "$kc" -P "$P12_PASSWORD" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$kp" "$kc" > /dev/null
+          # codesign --keychain still resolves the identity through the search list
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          security find-identity -p codesigning "$kc"
           rm -f "$RUNNER_TEMP/codesign.p12"
           echo "RY_SIGN_KEYCHAIN=$kc" >> "$GITHUB_ENV"
 
