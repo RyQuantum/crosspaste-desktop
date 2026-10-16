@@ -239,6 +239,8 @@ class DesktopImageTypePlugin(
                 }
         }
 
+        if (MacosBitmapImageWrite.isBitmapOnly(platform, pasteItem, fileList.size, getIdentifiers())) return
+
         map[DataFlavor.javaFileListFlavor.toPasteDataFlavor()] = fileList
 
         // Next to items of the other category, offer the files as text and URIs
