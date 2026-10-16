@@ -73,6 +73,7 @@ esac
 
 echo "== package"
 mkdir -p "$out_dir"
+out_dir="$(cd "$out_dir" && pwd)"   # the zip is written from inside $work
 (cd "$work" && ditto -c -k --sequesterRsrc --keepParent CrossPaste.app "$out_dir/$asset")
 (cd "$out_dir" && shasum -a 256 "$asset" > "$asset.sha256")
 cat "$out_dir/$asset.sha256"
