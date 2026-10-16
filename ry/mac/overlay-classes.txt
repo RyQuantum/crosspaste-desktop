@@ -1,0 +1,6 @@
+# Jar entries this fork replaces or adds in the official app-desktop jar (fnmatch patterns).
+# Add a line for every class a patch touches; overlay.py refuses any other difference.
+com/crosspaste/paste/plugin/type/DesktopImageTypePlugin.class
+com/crosspaste/paste/plugin/type/DesktopImageTypePlugin$*.class
+com/crosspaste/paste/plugin/type/MacosBitmapImageWrite.class
+com/crosspaste/paste/plugin/type/MacosBitmapImageWrite$*.class
