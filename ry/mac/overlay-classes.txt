@@ -4,3 +4,5 @@ com/crosspaste/paste/plugin/type/DesktopImageTypePlugin.class
 com/crosspaste/paste/plugin/type/DesktopImageTypePlugin$*.class
 com/crosspaste/paste/plugin/type/MacosBitmapImageWrite.class
 com/crosspaste/paste/plugin/type/MacosBitmapImageWrite$*.class
+com/crosspaste/paste/plugin/type/MacosBitmapImageRead.class
+com/crosspaste/paste/plugin/type/MacosBitmapImageRead$*.class

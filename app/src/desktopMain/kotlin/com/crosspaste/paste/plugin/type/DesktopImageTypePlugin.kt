@@ -57,6 +57,10 @@ class DesktopImageTypePlugin(
 
     private val fileUtils = getFileUtils()
 
+    init {
+        MacosBitmapImageRead.registerReadFlavors(platform)
+    }
+
     override fun getPasteType(): PasteType = PasteType.IMAGE_TYPE
 
     override fun getIdentifiers(): List<String> = listOf(X_JAVA_IMAGE, IMAGE_PNG, IMAGE_JPEG, IMAGE)
@@ -96,7 +100,17 @@ class DesktopImageTypePlugin(
         var image: BufferedImage? = null
 
         if (transferData is Image) {
-            image = toBufferedImage(img = transferData)
+            image =
+                toBufferedImage(
+                    img =
+                        MacosBitmapImageRead.fullResolution(
+                            platform,
+                            imageHandler,
+                            transferData,
+                            dataFlavorMap,
+                            pasteTransferable,
+                        ) ?: transferData,
+                )
         } else if (transferData is InputStream) {
             image = imageHandler.readImage(transferData.asSource().buffered())
         }
