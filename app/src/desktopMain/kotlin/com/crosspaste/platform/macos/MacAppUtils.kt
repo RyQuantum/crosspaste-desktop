@@ -25,28 +25,15 @@ object MacAppUtils {
         INSTANCE.mainToBack(appName)
     }
 
-    fun mainToBackAndPaste(
-        appName: String,
-        array: Pointer,
-        count: Int,
-    ) {
-        INSTANCE.mainToBackAndPaste(appName, array, count)
-    }
-
     fun searchToBack(appName: String) {
         INSTANCE.searchToBack(appName)
     }
 
-    fun searchToBackAndPaste(
-        appName: String,
-        array: Pointer,
-        count: Int,
+    fun setWindowLevelPopUpMenu(
+        windowPtr: Pointer?,
+        levelOffset: Int = 0,
     ) {
-        INSTANCE.searchToBackAndPaste(appName, array, count)
-    }
-
-    fun setWindowLevelPopUpMenu(windowPtr: Pointer?) {
-        INSTANCE.setWindowLevelPopUpMenu(windowPtr)
+        INSTANCE.setWindowLevelPopUpMenu(windowPtr, levelOffset)
     }
 
     fun makeWindowNonActivating(windowPtr: Pointer?) {
@@ -67,8 +54,11 @@ object MacAppUtils {
         INSTANCE.bringToFront(appName, if (showDockIcon) 1 else 0)
     }
 
-    fun setDockIconVisibility(showDockIcon: Boolean) {
-        INSTANCE.setDockIconVisibility(if (showDockIcon) 1 else 0)
+    fun setDockIconVisibility(
+        showDockIcon: Boolean,
+        restoreActivation: Boolean,
+    ) {
+        INSTANCE.setDockIconVisibility(if (showDockIcon) 1 else 0, if (restoreActivation) 1 else 0)
     }
 
     /** Retitles the "About <app>" item in the macOS application menu. */
@@ -77,6 +67,10 @@ object MacAppUtils {
     }
 
     fun getCurrentActiveAppInfo(): String? = MacosApi.getString(INSTANCE.getCurrentActiveAppInfo())
+
+    fun isApplicationActive(): Boolean = INSTANCE.isApplicationActive() != 0
+
+    fun isPointerOnStatusItem(): Boolean = INSTANCE.isPointerOnStatusItem() != 0
 
     fun getRunningApplications(): List<Pair<String, String>> {
         val raw = MacosApi.getString(INSTANCE.getRunningApplications()) ?: return emptyList()

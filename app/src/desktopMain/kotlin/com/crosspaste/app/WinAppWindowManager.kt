@@ -4,6 +4,7 @@ import androidx.compose.ui.awt.ComposeWindow
 import com.crosspaste.listener.DesktopShortcutKeys.Companion.PASTE
 import com.crosspaste.listener.ShortcutKeys
 import com.crosspaste.listener.ShortcutKeysListener
+import com.crosspaste.notification.NotificationManager
 import com.crosspaste.path.UserDataPathProvider
 import com.crosspaste.platform.windows.WinAppInfo
 import com.crosspaste.platform.windows.WinAppInfoCaches
@@ -11,6 +12,8 @@ import com.crosspaste.platform.windows.WindowFocusRecorder
 import com.crosspaste.platform.windows.WindowsFocusUtils
 import com.crosspaste.platform.windows.api.User32.Companion.INSTANCE
 import com.crosspaste.platform.windows.api.WndEnumProc
+import com.crosspaste.ui.awaitWindowShowing
+import com.crosspaste.utils.pollUntil
 import com.sun.jna.Native
 import com.sun.jna.platform.win32.WinDef
 import com.sun.jna.platform.win32.WinDef.HWND
@@ -19,12 +22,14 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import okio.Path
 import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
 
 class WinAppWindowManager(
     appInfo: AppInfo,
     appSize: DesktopAppSize,
     private val lazyShortcutKeys: Lazy<ShortcutKeys>,
     private val lazyShortcutKeysListener: Lazy<ShortcutKeysListener>,
+    private val lazyNotificationManager: Lazy<NotificationManager>,
     userDataPathProvider: UserDataPathProvider,
 ) : DesktopAppWindowManager(appSize) {
 
@@ -43,10 +48,35 @@ class WinAppWindowManager(
     val searchHWND: HWND?
         get() {
             if (_cachedSearchHWND == null) {
-                _cachedSearchHWND = WindowsFocusUtils.findPasteWindow(searchWindowTitle)
+                val window = searchComposeWindow?.takeIf { it.isDisplayable } ?: return null
+                _cachedSearchHWND = HWND(Native.getWindowPointer(window))
             }
             return _cachedSearchHWND
         }
+
+    fun isSearchWindowForeground(): Boolean = WindowsFocusUtils.isWindowForeground(searchHWND)
+
+    fun isSearchWindowComposing(): Boolean = WindowsFocusUtils.isSearchWindowComposing(searchHWND)
+
+    fun isOutsideSearchWindow(
+        x: Int,
+        y: Int,
+    ): Boolean {
+        val bubble = bubbleComposeWindow?.takeIf { it.isShowing }?.let { HWND(Native.getWindowPointer(it)) }
+        return WindowsFocusUtils.isOutsideSearchWindow(x, y, searchHWND, bubble)
+    }
+
+    fun isSearchWindow(hwnd: HWND?): Boolean = hwnd != null && hwnd == searchHWND
+
+    fun isMainWindowForeground(): Boolean {
+        val window = mainComposeWindow?.takeIf { it.isDisplayable } ?: return false
+        return WindowsFocusUtils.isWindowForeground(HWND(Native.getWindowPointer(window)))
+    }
+
+    fun isBubbleWindowForeground(): Boolean {
+        val window = bubbleComposeWindow?.takeIf { it.isDisplayable } ?: return false
+        return WindowsFocusUtils.isWindowForeground(HWND(Native.getWindowPointer(window)))
+    }
 
     val bubbleHWND: HWND?
         get() {
@@ -58,7 +88,10 @@ class WinAppWindowManager(
 
     private val winAppInfoCaches = WinAppInfoCaches(appInfo, userDataPathProvider, ioScope)
 
-    private val windowFocusRecorder = WindowFocusRecorder(this)
+    private val windowFocusRecorder = WindowFocusRecorder()
+
+    fun subscribeForegroundChanges(listener: (HWND?) -> Unit): AutoCloseable =
+        windowFocusRecorder.subscribeForegroundChanges(listener)
 
     override fun getPrevAppName(): Flow<String?> =
         windowFocusRecorder.lastWinAppInfo.map { appInfo ->
@@ -142,25 +175,47 @@ class WinAppWindowManager(
 
     override suspend fun hideMainWindowAndPaste(preparePaste: suspend () -> Boolean) {
         logger.info { "unActive main window" }
-        bringToBack(preparePaste(), mainHWND)
+        val toPaste = preparePaste()
+        val prevHwnd = windowFocusRecorder.lastWinAppInfo.value?.hwnd
+        WindowsFocusUtils.backToBack(mainHWND, prevHwnd)
+        if (toPaste) {
+            pasteIntoPreviousApp(prevHwnd)
+        }
         hideMainWindow()
     }
 
     override suspend fun focusSearchWindow(windowTrigger: WindowTrigger) {
-        // Wait for the window to be ready, otherwise bringToFront may cause the window to fail to get focus
-        delay(500.milliseconds)
-        WindowsFocusUtils.bringToFront(
-            windowFocusRecorder.lastWinAppInfo.value?.getThreadId(winAppInfoCaches),
-            searchHWND,
-        )
+        val window = searchComposeWindow ?: return
+        awaitWindowShowing(window)
+        WindowsFocusUtils.activateSearchWindow(searchHWND)
     }
 
     override suspend fun focusBubbleWindow() {
+        // Take ownership as soon as the bubble shows, not after the activation delay:
+        // it is what keeps the bubble above the search window.
+        pollUntil(BUBBLE_SHOW_TIMEOUT, BUBBLE_SHOW_POLL_INTERVAL) { bubbleComposeWindow?.isShowing == true }
+        keepBubbleAboveSearch()
         delay(500.milliseconds)
+        raiseBubbleWindow()
+    }
+
+    override suspend fun raiseBubbleWindow() {
+        keepBubbleAboveSearch()
         WindowsFocusUtils.bringToFront(
             windowFocusRecorder.lastWinAppInfo.value?.getThreadId(winAppInfoCaches),
             bubbleHWND,
         )
+    }
+
+    /**
+     * Both windows are topmost, so a click on the search window would otherwise stack it
+     * over the bubble. The bubble window is destroyed when it hides, which ends the
+     * ownership with it.
+     */
+    private fun keepBubbleAboveSearch() {
+        val bubble = bubbleHWND ?: return
+        val search = searchHWND ?: return
+        WindowsFocusUtils.setOwner(bubble, search)
     }
 
     override suspend fun returnFocusToPreviousApp() {
@@ -172,33 +227,39 @@ class WinAppWindowManager(
         preparePaste: suspend (Int) -> Boolean,
     ) {
         logger.info { "unActive search window" }
-        bringToBack(preparePaste(0), searchHWND)
-        for (i in 1 until size) {
-            delay(1000.milliseconds)
-            if (preparePaste(i)) {
-                toPaste()
+        val toPaste = preparePaste(0)
+        val prevHwnd = windowFocusRecorder.lastWinAppInfo.value?.hwnd
+        WindowsFocusUtils.backToBack(searchHWND, prevHwnd)
+        if (toPaste && pasteIntoPreviousApp(prevHwnd)) {
+            for (i in 1 until size) {
+                delay(1000.milliseconds)
+                if (preparePaste(i)) {
+                    toPaste()
+                }
             }
         }
         hideSearchWindow()
     }
 
-    private fun bringToBack(
-        toPaste: Boolean,
-        backHWND: HWND?,
-    ) {
-        if (toPaste) {
-            val keyCodes =
-                lazyShortcutKeys.value.shortcutKeysCore.value.keys[PASTE]?.let {
-                    it.map { key -> key.rawCode }
-                } ?: listOf()
-            WindowsFocusUtils.bringToBackAndPaste(
-                backHWND,
-                windowFocusRecorder.lastWinAppInfo.value?.hwnd,
-                keyCodes,
-            )
-        } else {
-            WindowsFocusUtils.backToBack(backHWND, windowFocusRecorder.lastWinAppInfo.value?.hwnd)
+    /**
+     * Sends the paste once [prevHwnd]'s app holds the foreground again, or asks the
+     * user to paste manually when SetForegroundWindow did not bring it back. The caller
+     * must pass the window it captured before hiding ours: hiding hands the foreground
+     * to whatever window is next, and the focus recorder may already have stored that
+     * one. With no previous window recorded, any app other than CrossPaste counts.
+     */
+    private suspend fun pasteIntoPreviousApp(prevHwnd: HWND?): Boolean {
+        val foreground =
+            awaitForeground {
+                prevHwnd?.let(WindowsFocusUtils::isForegroundProcessOf)
+                    ?: WindowsFocusUtils.isOtherApplicationForeground()
+            }
+        if (!foreground) {
+            notifyManualPasteRequired(lazyNotificationManager.value, lazyShortcutKeys.value)
+            return false
         }
+        toPaste()
+        return true
     }
 
     override suspend fun toPaste() {
@@ -228,3 +289,7 @@ class WinAppWindowManager(
         _cachedBubbleHWND = null
     }
 }
+
+private val BUBBLE_SHOW_TIMEOUT = 1.seconds
+
+private val BUBBLE_SHOW_POLL_INTERVAL = 10.milliseconds

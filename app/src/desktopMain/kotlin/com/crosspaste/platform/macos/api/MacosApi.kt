@@ -52,6 +52,10 @@ interface MacosApi : Library {
 
     fun getCurrentActiveAppInfo(): Pointer?
 
+    fun isApplicationActive(): Int
+
+    fun isPointerOnStatusItem(): Int
+
     fun getRunningApplications(): Pointer?
 
     fun getAppInfoAtPath(path: String): Pointer?
@@ -68,21 +72,12 @@ interface MacosApi : Library {
 
     fun mainToBack(appName: String)
 
-    fun mainToBackAndPaste(
-        appName: String,
-        array: Pointer,
-        count: Int,
-    )
-
     fun searchToBack(appName: String)
 
-    fun searchToBackAndPaste(
-        appName: String,
-        array: Pointer,
-        count: Int,
+    fun setWindowLevelPopUpMenu(
+        windowPtr: Pointer?,
+        levelOffset: Int,
     )
-
-    fun setWindowLevelPopUpMenu(windowPtr: Pointer?)
 
     fun makeWindowNonActivating(windowPtr: Pointer?)
 
@@ -98,7 +93,10 @@ interface MacosApi : Library {
         showDockIcon: Int,
     )
 
-    fun setDockIconVisibility(showDockIcon: Int)
+    fun setDockIconVisibility(
+        showDockIcon: Int,
+        restoreActivation: Int,
+    )
 
     fun setAboutMenuItemTitle(title: String)
 

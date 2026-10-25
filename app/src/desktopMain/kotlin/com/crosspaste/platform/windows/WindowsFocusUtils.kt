@@ -1,13 +1,14 @@
 package com.crosspaste.platform.windows
 
+import com.crosspaste.platform.windows.api.Imm32
+import com.crosspaste.platform.windows.api.Shell32
 import com.crosspaste.platform.windows.api.User32
-import com.sun.jna.platform.win32.BaseTSD.ULONG_PTR
+import com.crosspaste.platform.windows.api.windowProcessId
+import com.sun.jna.Native
 import com.sun.jna.platform.win32.Kernel32
 import com.sun.jna.platform.win32.WinDef.DWORD
 import com.sun.jna.platform.win32.WinDef.HWND
-import com.sun.jna.platform.win32.WinDef.WORD
 import com.sun.jna.platform.win32.WinUser
-import com.sun.jna.platform.win32.WinUser.INPUT
 import com.sun.jna.platform.win32.WinUser.SW_HIDE
 import com.sun.jna.platform.win32.WinUser.SW_RESTORE
 import com.sun.jna.ptr.IntByReference
@@ -19,9 +20,58 @@ object WindowsFocusUtils {
 
     private val user32 = User32.INSTANCE
 
+    private val searchActivation = WindowsSearchWindowActivation(user32, Kernel32.INSTANCE)
+
+    private val trayHitTest = WindowsTrayHitTest(user32, Shell32.INSTANCE, Kernel32.INSTANCE.GetCurrentProcessId())
+
+    private val searchPointer = WindowsSearchWindowPointer(user32, trayHitTest::contains)
+
+    private val inputMethod = WindowsInputMethod(user32, Imm32.INSTANCE)
+
+    private val pasteKeystroke = WindowsPasteKeystroke(user32)
+
+    fun isSearchWindowComposing(search: HWND?): Boolean = inputMethod.isComposing(search)
+
+    fun isTrayForeground(): Boolean = user32.GetForegroundWindow()?.let(trayHitTest::ownsForeground) == true
+
+    fun isTrayIcon(
+        x: Int,
+        y: Int,
+    ): Boolean = trayHitTest.contains(x, y)
+
+    fun isOutsideSearchWindow(
+        x: Int,
+        y: Int,
+        search: HWND?,
+        bubble: HWND?,
+    ): Boolean = searchPointer.isOutside(x, y, search, bubble)
+
+    fun activateSearchWindow(hwnd: HWND?): Boolean = searchActivation.activate(hwnd)
+
     private const val WS_EX_TOOLWINDOW = 0x00000080
 
+    private const val GWLP_HWNDPARENT = -8
+
     private const val WS_EX_NOACTIVATE = 0x08000000
+
+    fun isWindowForeground(hwnd: HWND?): Boolean = hwnd != null && user32.GetForegroundWindow() == hwnd
+
+    fun isOtherApplicationForeground(): Boolean {
+        val processId = getForegroundProcessId() ?: return false
+        return processId != Kernel32.INSTANCE.GetCurrentProcessId()
+    }
+
+    /**
+     * Whether the foreground window belongs to the same process as [hwnd]. Compared by
+     * process rather than handle: the app may bring up another of its windows (an owner
+     * frame, a dialog) on activation, and the keystroke still reaches it.
+     */
+    fun isForegroundProcessOf(hwnd: HWND): Boolean {
+        val processId = user32.windowProcessId(hwnd) ?: return false
+        return processId == getForegroundProcessId()
+    }
+
+    private fun getForegroundProcessId(): Int? = user32.GetForegroundWindow()?.let(user32::windowProcessId)
 
     @Synchronized
     fun bringToFront(
@@ -37,7 +87,8 @@ object WindowsFocusUtils {
                 0
             }
 
-        val shouldAttach = prevThreadId != null
+        // Attaching a thread to itself is invalid (ERROR_INVALID_PARAMETER).
+        val shouldAttach = prevThreadId != null && prevThreadId != targetThreadId
         if (shouldAttach) {
             val success =
                 user32.AttachThreadInput(
@@ -84,47 +135,7 @@ object WindowsFocusUtils {
         }
     }
 
-    fun bringToBackAndPaste(
-        backWindow: HWND?,
-        previousHwnd: HWND?,
-        keyCodes: List<Int>,
-    ) {
-        backToBack(backWindow, previousHwnd)
-        paste(keyCodes)
-    }
-
-    @Suppress("UNCHECKED_CAST")
-    fun paste(keyCodes: List<Int>) {
-        if (keyCodes.isEmpty()) {
-            return
-        }
-
-        val inputs: Array<INPUT> = INPUT().toArray(keyCodes.size) as Array<INPUT>
-
-        for (i in keyCodes.indices) {
-            inputs[i].type = DWORD(INPUT.INPUT_KEYBOARD.toLong())
-            inputs[i].input.setType(
-                "ki",
-            )
-
-            // Because setting INPUT_INPUT_KEYBOARD is not enough:
-            // https://groups.google.com/d/msg/jna-users/NDBGwC1VZbU/cjYCQ1CjBwAJ
-            inputs[i].input.ki.wScan = WORD(0)
-            inputs[i].input.ki.time = DWORD(0)
-            inputs[i].input.ki.dwExtraInfo = ULONG_PTR(0)
-
-            inputs[i].input.ki.wVk = WORD(keyCodes[i].toLong())
-            inputs[i].input.ki.dwFlags = DWORD(0) // keydown
-        }
-
-        user32.SendInput(DWORD(inputs.size.toLong()), inputs, inputs[0].size())
-
-        for (i in keyCodes.indices) {
-            inputs[i].input.ki.dwFlags = DWORD(2) // keyup
-        }
-
-        user32.SendInput(DWORD(inputs.size.toLong()), inputs, inputs[0].size())
-    }
+    fun paste(keyCodes: List<Int>) = pasteKeystroke.send(keyCodes)
 
     /**
      * Keeps the window off the taskbar and stops a click on it from making it the
@@ -137,6 +148,22 @@ object WindowsFocusUtils {
             WinUser.GWL_EXSTYLE,
             style or WS_EX_TOOLWINDOW or WS_EX_NOACTIVATE,
         )
+    }
+
+    /** Makes [owner] the owner of [hwnd]: Windows always stacks an owned window above its owner. */
+    fun setOwner(
+        hwnd: HWND,
+        owner: HWND,
+    ) {
+        // The previous owner comes back, which is null both for an unowned window and on
+        // failure: only the last error tells them apart.
+        Native.setLastError(0)
+        if (user32.SetWindowLongPtr(hwnd, GWLP_HWNDPARENT, owner.pointer) == null) {
+            val error = Native.getLastError()
+            if (error != 0) {
+                logger.warn { "Failed to set the owner window: error $error" }
+            }
+        }
     }
 
     fun findPasteWindow(windowTitle: String): HWND? =

@@ -1,5 +1,7 @@
 package com.crosspaste.ui
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -18,11 +20,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Outline
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.drawOutline
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -42,16 +47,20 @@ import com.crosspaste.app.DesktopAppWindowManager
 import com.crosspaste.db.paste.PasteDao
 import com.crosspaste.paste.PasteData
 import com.crosspaste.ui.DesktopContext.BubbleWindowContext
+import com.crosspaste.ui.DesktopDisplayScale.toWindowUnits
 import com.crosspaste.ui.model.PasteSearchViewModel
 import com.crosspaste.ui.model.PasteSelectionViewModel
 import com.crosspaste.ui.paste.PasteDataScope
 import com.crosspaste.ui.paste.createPasteDataScope
 import com.crosspaste.ui.paste.edit.PasteHtmlEditContentView
 import com.crosspaste.ui.paste.edit.PasteTextEditContentView
+import com.crosspaste.ui.theme.AppUISize.tiny4X
 import com.crosspaste.utils.getPlatformUtils
 import io.github.oshai.kotlinlogging.KotlinLogging
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import org.koin.compose.koinInject
+import java.awt.Toolkit
 import java.awt.event.WindowAdapter
 import java.awt.event.WindowEvent
 import java.util.concurrent.atomic.AtomicBoolean
@@ -116,6 +125,20 @@ private class BubbleShape(
     }
 }
 
+private const val ATTENTION_FLASH_MS = 90
+
+internal fun bubblePositionX(
+    searchX: Dp,
+    searchWidth: Dp,
+    bubbleWidth: Dp,
+    itemCenterX: Dp?,
+): Dp {
+    val idealX = searchX + (itemCenterX ?: (searchWidth / 2)) - bubbleWidth / 2
+    // An oversized bubble is left-aligned instead of producing an empty clamp range.
+    val maxX = maxOf(searchX, searchX + searchWidth - bubbleWidth)
+    return idealX.coerceIn(searchX, maxX)
+}
+
 @Composable
 fun BubbleWindow(windowIcon: Painter?) {
     val appWindowManager = koinInject<DesktopAppWindowManager>()
@@ -134,8 +157,8 @@ fun BubbleWindow(windowIcon: Painter?) {
 
     val bubbleBodySize = appSizeValue.bubbleBodySize
     val bubbleTailHeight = appSizeValue.bubbleTailHeight
-    val windowSize = DpSize(bubbleBodySize.width, bubbleBodySize.height + bubbleTailHeight)
-    val gap = 4.dp
+    val windowSize = DpSize(bubbleBodySize.width, bubbleBodySize.height + bubbleTailHeight).toWindowUnits()
+    val gap = 4.dp.toWindowUnits()
 
     val logger = remember { KotlinLogging.logger("BubbleWindow") }
     val ignoreFocusLoss = remember { AtomicBoolean(true) }
@@ -158,8 +181,8 @@ fun BubbleWindow(windowIcon: Painter?) {
             // Card center = slot offset + paddingSize + cardWidth / 2
             with(density) {
                 itemInfo.offset.toDp() +
-                    appSizeValue.sideSearchPaddingSize +
-                    appSizeValue.sidePasteSize.width / 2
+                    appSizeValue.sideSearchPaddingSize.toWindowUnits() +
+                    appSizeValue.sidePasteSize.width.toWindowUnits() / 2
             }
         }
     }
@@ -173,16 +196,13 @@ fun BubbleWindow(windowIcon: Painter?) {
         val searchPos = searchWindowInfo.state.position
         val searchWidth = searchWindowInfo.state.size.width
         val centerX = itemCenterXInSearchWindow
-        val idealBubbleX =
-            if (centerX != null) {
-                searchPos.x + centerX - windowSize.width / 2
-            } else {
-                searchPos.x + (searchWidth - windowSize.width) / 2
-            }
-        // Clamp bubble X within the search window bounds
-        val minX = searchPos.x
-        val maxX = searchPos.x + searchWidth - windowSize.width
-        val clampedBubbleX = idealBubbleX.coerceIn(minX, maxX)
+        val clampedBubbleX =
+            bubblePositionX(
+                searchX = searchPos.x,
+                searchWidth = searchWidth,
+                bubbleWidth = windowSize.width,
+                itemCenterX = centerX,
+            )
 
         // Compute tail fraction: where should the tail point within the bubble?
         tailCenterFraction =
@@ -193,7 +213,7 @@ fun BubbleWindow(windowIcon: Painter?) {
                 0.5f
             }
 
-        val bubbleY = searchPos.y - windowSize.height - gap + appSizeValue.sideSearchTopBarHeight
+        val bubbleY = searchPos.y - windowSize.height - gap + appSizeValue.sideSearchTopBarHeight.toWindowUnits()
         return WindowPosition(x = clampedBubbleX, y = bubbleY)
     }
 
@@ -228,6 +248,23 @@ fun BubbleWindow(windowIcon: Painter?) {
         }
     }
 
+    // The bubble is modal over the search window: when the user reaches for the search
+    // window, alert, bring the bubble back and flash its outline.
+    val attentionFlash = remember { Animatable(0f) }
+    LaunchedEffect(Unit) {
+        appWindowManager.bubbleAttentionRequests.collectLatest {
+            if (!appWindowManager.isBubbleWindowVisible()) return@collectLatest
+            Toolkit.getDefaultToolkit().beep()
+            // Raise right after the visibility check, not from a launched coroutine: one
+            // queued behind an Esc would reopen the bubble that Esc just closed.
+            appWindowManager.raiseBubbleWindow()
+            repeat(2) {
+                attentionFlash.animateTo(1f, tween(ATTENTION_FLASH_MS))
+                attentionFlash.animateTo(0f, tween(ATTENTION_FLASH_MS))
+            }
+        }
+    }
+
     LaunchedEffect(bubbleWindowInfo.show) {
         if (bubbleWindowInfo.show) {
             ignoreFocusLoss.set(true)
@@ -250,54 +287,59 @@ fun BubbleWindow(windowIcon: Painter?) {
         transparent = true,
         resizable = false,
     ) {
-        if (isMac) {
-            MacAcrylicEffect(window = this.window)
-        }
-
-        DisposableEffect(Unit) {
-            appWindowManager.bubbleComposeWindow = window
-
-            val windowListener =
-                object : WindowAdapter() {
-                    override fun windowGainedFocus(e: WindowEvent) {
-                        logger.info { "Bubble window gained focus" }
-                    }
-
-                    override fun windowLostFocus(e: WindowEvent) {
-                        if (ignoreFocusLoss.get()) {
-                            logger.info { "Ignored focus loss during startup grace period" }
-                            return
-                        }
-
-                        logger.info { "Bubble window lost focus" }
-                        val oppositeWindow = e.oppositeWindow
-                        val isSearchWindow = oppositeWindow == appWindowManager.searchComposeWindow
-                        val isMainWindow = oppositeWindow == appWindowManager.mainComposeWindow
-                        // Focus went to another app. The search window handed its focus to the
-                        // bubble, so it gets no focus-lost event of its own: close it with the
-                        // bubble instead of leaving it on top. Skip when the bubble is already
-                        // closing (Esc), where the search window must stay.
-                        if (!isSearchWindow && !isMainWindow && appWindowManager.isBubbleWindowVisible()) {
-                            appWindowManager.hideSearchWindow()
-                        }
-                    }
-                }
-
-            window.addWindowFocusListener(windowListener)
-
-            onDispose {
-                window.removeWindowFocusListener(windowListener)
-                appWindowManager.bubbleComposeWindow = null
+        DisplayScaleContent {
+            if (isMac) {
+                // One level above the search window, which shares the pop-up-menu level:
+                // a click on the search window must not stack it over the bubble.
+                MacAcrylicEffect(window = this.window, levelOffset = 1)
             }
-        }
 
-        BubbleWindowContext {
-            BubbleWindowContent(
-                pasteId = bubbleWindowInfo.pasteId,
-                pasteDao = pasteDao,
-                onEscape = { appWindowManager.hideBubbleWindow() },
-                tailCenterFraction = tailCenterFraction,
-            )
+            DisposableEffect(Unit) {
+                appWindowManager.bubbleComposeWindow = window
+
+                val windowListener =
+                    object : WindowAdapter() {
+                        override fun windowGainedFocus(e: WindowEvent) {
+                            logger.info { "Bubble window gained focus" }
+                        }
+
+                        override fun windowLostFocus(e: WindowEvent) {
+                            if (ignoreFocusLoss.get()) {
+                                logger.info { "Ignored focus loss during startup grace period" }
+                                return
+                            }
+
+                            logger.info { "Bubble window lost focus" }
+                            val oppositeWindow = e.oppositeWindow
+                            val isSearchWindow = oppositeWindow == appWindowManager.searchComposeWindow
+                            val isMainWindow = oppositeWindow == appWindowManager.mainComposeWindow
+                            // Focus went to another app. The search window handed its focus to the
+                            // bubble, so it gets no focus-lost event of its own: close it with the
+                            // bubble instead of leaving it on top. Skip when the bubble is already
+                            // closing (Esc), where the search window must stay.
+                            if (!isSearchWindow && !isMainWindow && appWindowManager.isBubbleWindowVisible()) {
+                                appWindowManager.hideSearchWindow()
+                            }
+                        }
+                    }
+
+                window.addWindowFocusListener(windowListener)
+
+                onDispose {
+                    window.removeWindowFocusListener(windowListener)
+                    appWindowManager.bubbleComposeWindow = null
+                }
+            }
+
+            BubbleWindowContext {
+                BubbleWindowContent(
+                    pasteId = bubbleWindowInfo.pasteId,
+                    pasteDao = pasteDao,
+                    onEscape = { appWindowManager.hideBubbleWindow() },
+                    tailCenterFraction = tailCenterFraction,
+                    attentionFlash = { attentionFlash.value },
+                )
+            }
         }
     }
 }
@@ -308,6 +350,7 @@ private fun BubbleWindowContent(
     pasteDao: PasteDao,
     onEscape: () -> Unit,
     tailCenterFraction: Float,
+    attentionFlash: () -> Float,
 ) {
     val appSizeValue = LocalDesktopAppSizeValueState.current
 
@@ -321,6 +364,8 @@ private fun BubbleWindowContent(
         loading = false
     }
 
+    val flashColor = MaterialTheme.colorScheme.primary
+    val flashStrokeWidth = tiny4X
     val cornerRadius = appSizeValue.bubbleCornerRadius
     val tailHeight = appSizeValue.bubbleTailHeight
     val shape: Shape =
@@ -340,7 +385,19 @@ private fun BubbleWindowContent(
                         false
                     }
                 }.clip(shape)
-                .background(MaterialTheme.colorScheme.surface),
+                .background(MaterialTheme.colorScheme.surface)
+                .drawWithContent {
+                    drawContent()
+                    val alpha = attentionFlash()
+                    if (alpha > 0f) {
+                        drawOutline(
+                            outline = shape.createOutline(size, layoutDirection, this),
+                            color = flashColor.copy(alpha = alpha),
+                            // Centered on the clipped edge, so only half of it shows.
+                            style = Stroke(width = flashStrokeWidth.toPx() * 2),
+                        )
+                    }
+                },
     ) {
         Box(
             modifier =

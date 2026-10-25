@@ -31,6 +31,7 @@ import com.crosspaste.cli.CliSymlinkService
 import com.crosspaste.config.AppMetadataRepository
 import com.crosspaste.config.DesktopConfigManager
 import com.crosspaste.db.DriverFactory
+import com.crosspaste.image.installCrossPasteSourceIcon
 import com.crosspaste.listener.GlobalListener
 import com.crosspaste.log.DesktopCrossPasteLogger
 import com.crosspaste.mcp.McpServer
@@ -44,9 +45,12 @@ import com.crosspaste.paste.PasteReleaseService
 import com.crosspaste.paste.PasteboardService
 import com.crosspaste.path.DesktopAppPathProvider
 import com.crosspaste.path.UserDataPathProvider
+import com.crosspaste.plugin.BundledPluginInstaller
+import com.crosspaste.plugin.PluginRepository
 import com.crosspaste.presist.FilePersist
 import com.crosspaste.rendering.RenderingService
 import com.crosspaste.sync.PastePullService
+import com.crosspaste.sync.PastePullTrigger
 import com.crosspaste.sync.QRCodeGenerator
 import com.crosspaste.sync.SyncManager
 import com.crosspaste.task.TaskExecutor
@@ -120,6 +124,7 @@ class CrossPaste {
             DRIVER_FACTORY,
             GLOBAL_LISTENER,
             MCP_SERVER,
+            PASTE_PULL_TRIGGER,
             PASTE_CLIENT,
             PASTE_SERVER,
             PASTEBOARD,
@@ -194,6 +199,7 @@ class CrossPaste {
                     koin.get<PasteReleaseService>().discardInterruptedReceives()
                     getManagedService<SyncManager>(ManagedService.SYNC_MANAGER).start()
                     koin.get<PastePullService>().init()
+                    getManagedService<PastePullTrigger>(ManagedService.PASTE_PULL_TRIGGER).start()
                     val pasteServer = getManagedService<Server>(ManagedService.PASTE_SERVER)
                     if (headless) {
                         // A daemon without its sync endpoint is not operational.
@@ -247,6 +253,13 @@ class CrossPaste {
                         koin.get<NativeMessagingHostService>().register()
                         koin.get<GuidePasteDataService>().initData()
                         ioCoroutineDispatcher.launch { koin.get<CliSymlinkService>().refresh() }
+                        ioCoroutineDispatcher.launch {
+                            installCrossPasteSourceIcon(koin.get(), koin.get())
+                        }
+                        ioCoroutineDispatcher.launch {
+                            koin.get<BundledPluginInstaller>().install()
+                            koin.get<PluginRepository>().reload()
+                        }
 
                         appWindowManager.startWindowService()
                         FileKit.init(appId = AppName)
@@ -396,6 +409,14 @@ class CrossPaste {
                                     stopManagedService<McpServer>(ManagedService.MCP_SERVER, "McpServer") {
                                         it.stop()
                                     }
+                                },
+                            )
+                            add(
+                                async {
+                                    stopManagedService<PastePullTrigger>(
+                                        ManagedService.PASTE_PULL_TRIGGER,
+                                        "PastePullTrigger",
+                                    ) { it.stop() }
                                 },
                             )
                             add(

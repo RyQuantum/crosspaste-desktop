@@ -319,26 +319,6 @@ public func mainToBack(
     }
 }
 
-@_cdecl("mainToBackAndPaste")
-public func mainToBack(
-    appName: UnsafePointer<CChar>,
-    keyCodesPointer: UnsafePointer<Int32>,
-    count: Int
-) {
-    let appNameString = String(cString: appName)
-    let keyCodes = Array(UnsafeBufferPointer(start: keyCodesPointer, count: count))
-    DispatchQueue.main.async {
-        hideWindowAndActivateApp(hideTitle: "CrossPaste", appName: appNameString)
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            keyCodes.withUnsafeBufferPointer { buffer in
-                guard let baseAddress = buffer.baseAddress else { return }
-                simulatePasteCommand(keyCodesPointer: baseAddress, count: buffer.count)
-            }
-        }
-    }
-}
-
 @_cdecl("searchToBack")
 public func searchToBack(
     appName: UnsafePointer<CChar>
@@ -346,26 +326,6 @@ public func searchToBack(
     let appNameString = String(cString: appName)
     DispatchQueue.main.async {
         hideWindowAndActivateApp(hideTitle: "CrossPaste Search", appName: appNameString)
-    }
-}
-
-@_cdecl("searchToBackAndPaste")
-public func searchToBackAndPaste(
-    appName: UnsafePointer<CChar>,
-    keyCodesPointer: UnsafePointer<Int32>,
-    count: Int
-) {
-    let appNameString = String(cString: appName)
-    let keyCodes = Array(UnsafeBufferPointer(start: keyCodesPointer, count: count))
-    DispatchQueue.main.async {
-        hideWindowAndActivateApp(hideTitle: "CrossPaste Search", appName: appNameString)
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            keyCodes.withUnsafeBufferPointer { buffer in
-                guard let baseAddress = buffer.baseAddress else { return }
-                simulatePasteCommand(keyCodesPointer: baseAddress, count: buffer.count)
-            }
-        }
     }
 }
 
@@ -387,8 +347,10 @@ private func hideWindowAndActivateApp(hideTitle: String, appName: String) {
     }
 }
 
+// A positive levelOffset keeps the window above the other pop-up-menu-level windows,
+// whatever order they are brought to the front in.
 @_cdecl("setWindowLevelPopUpMenu")
-public func setWindowLevelPopUpMenu(_ rawPtr: UnsafeRawPointer?) {
+public func setWindowLevelPopUpMenu(_ rawPtr: UnsafeRawPointer?, levelOffset: Int32) {
     guard let rawPtr = rawPtr else { return }
 
     let window = Unmanaged<NSWindow>.fromOpaque(rawPtr).takeUnretainedValue()
@@ -399,7 +361,7 @@ public func setWindowLevelPopUpMenu(_ rawPtr: UnsafeRawPointer?) {
         }
 
         let popUpMenuLevel = CGWindowLevelForKey(.popUpMenuWindow)
-        window.level = NSWindow.Level(rawValue: Int(popUpMenuLevel))
+        window.level = NSWindow.Level(rawValue: Int(popUpMenuLevel) + Int(levelOffset))
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
     }
 }
@@ -501,6 +463,86 @@ public func getCurrentActiveAppInfo() -> UnsafePointer<CChar>? {
     return nil
 }
 
+// Callers on the AWT EDT must not block on the main thread: during activation
+// changes AppKit can be waiting on the EDT itself, and the two threads then stall
+// each other for a full second. The state is mirrored from the main thread instead.
+private final class ApplicationActiveMonitor {
+    private let lock = NSLock()
+    private var active: Bool?
+
+    init() {
+        DispatchQueue.main.async { [self] in
+            // The notification center retains block-based observer tokens until they
+            // are removed; this monitor lives for the whole process, so the returned
+            // tokens are intentionally discarded.
+            for (name, value) in [
+                (NSApplication.didBecomeActiveNotification, true),
+                // willResignActive is posted before the key window resigns, hence before
+                // AWT can queue the focus-loss event that reads this cache. Mirroring it
+                // closes the window where a recheck could still observe the old `true`.
+                (NSApplication.willResignActiveNotification, false),
+                (NSApplication.didResignActiveNotification, false),
+            ] {
+                NotificationCenter.default.addObserver(forName: name, object: nil, queue: nil) { [self] _ in
+                    set(value)
+                }
+            }
+            set(NSApp?.isActive ?? false)
+        }
+    }
+
+    private func set(_ value: Bool) {
+        lock.lock()
+        active = value
+        lock.unlock()
+    }
+
+    /// Nil until the observers are registered on the main thread.
+    var isActive: Bool? {
+        lock.lock()
+        defer { lock.unlock() }
+        return active
+    }
+}
+
+private let applicationActiveMonitor = ApplicationActiveMonitor()
+
+@_cdecl("isApplicationActive")
+public func isApplicationActive() -> Int32 {
+    if Thread.isMainThread {
+        return (NSApp?.isActive ?? false) ? 1 : 0
+    }
+    if let active = applicationActiveMonitor.isActive {
+        return active ? 1 : 0
+    }
+    return DispatchQueue.main.sync { (NSApp?.isActive ?? false) ? 1 : 0 }
+}
+
+@_cdecl("isPointerOnStatusItem")
+public func isPointerOnStatusItem() -> Int32 {
+    // macOS 27 deactivates the app before it forwards the status item mouse-down,
+    // so the click event arrives too late. Hardware state is already current:
+    // the button is down over the icon. Requiring the press keeps Cmd+Tab while
+    // hovering the icon a real dismissal.
+    //
+    // The press is sampled before hopping to the main thread, so keyboard-driven
+    // focus changes never wait on AppKit. NSEvent's class-level hardware queries
+    // read the window server's current device state and touch no AppKit objects;
+    // AppKit does not document them as main-thread-only, so this read is
+    // intentionally done off the main thread.
+    guard NSEvent.pressedMouseButtons & 1 != 0 else { return 0 }
+    if !Thread.isMainThread {
+        return DispatchQueue.main.sync { isPointerOnStatusItem() }
+    }
+    let pointer = NSEvent.mouseLocation
+    let onStatusItem = (NSApp?.windows ?? []).contains { window in
+        NSStringFromClass(type(of: window)) == "NSStatusBarWindow" &&
+            window.isVisible &&
+            window.frame.contains(pointer)
+    }
+    return onStatusItem ? 1 : 0
+}
+
 @_cdecl("getRunningApplications")
 public func getRunningApplications() -> UnsafePointer<CChar>? {
     let apps = NSWorkspace.shared.runningApplications
@@ -532,14 +574,14 @@ public func bringToFront(windowTitle: UnsafePointer<CChar>, showDockIcon: Int32)
     let title = String(cString: windowTitle)
     DispatchQueue.main.async {
         let app = NSApplication.shared
+        // Switch the policy before activating: demoting to .accessory deactivates the
+        // app, and doing it after the window became key would dismiss that window.
+        _ = applyActivationPolicy(showDockIcon: showDockIcon != 0)
         app.activate(ignoringOtherApps: true)
         let windows = app.windows
         for window in windows {
             if window.title == title {
                 window.makeKeyAndOrderFront(nil)
-                if applyActivationPolicy(showDockIcon: showDockIcon != 0) {
-                    app.activate(ignoringOtherApps: true)
-                }
                 window.orderFrontRegardless()
                 window.makeKey()
                 break
@@ -549,14 +591,16 @@ public func bringToFront(windowTitle: UnsafePointer<CChar>, showDockIcon: Int32)
 }
 
 @_cdecl("setDockIconVisibility")
-public func setDockIconVisibility(showDockIcon: Int32) {
+public func setDockIconVisibility(showDockIcon: Int32, restoreActivation: Int32) {
     DispatchQueue.main.async {
         // Only restore the activation the policy switch itself took away (demoting to
         // .accessory deactivates an active app, dropping the settings window focus
         // mid-toggle). If the app is already inactive — e.g. the user closed the
         // window and switched away before this async block ran — never steal focus.
+        // Callers demoting because the main window hid pass restoreActivation = 0:
+        // focus belongs to the previous app then (it may be a paste target).
         let wasActive = NSApp.isActive
-        if applyActivationPolicy(showDockIcon: showDockIcon != 0) && wasActive {
+        if applyActivationPolicy(showDockIcon: showDockIcon != 0) && wasActive && restoreActivation != 0 {
             NSApplication.shared.activate(ignoringOtherApps: true)
         }
     }
@@ -590,37 +634,46 @@ public func simulatePasteCommand(keyCodesPointer: UnsafePointer<Int32>, count: I
         return
     }
 
-    let source = CGEventSource(stateID: .combinedSessionState)
     let keyCodes = UnsafeBufferPointer(start: keyCodesPointer, count: count)
 
+    // Modifiers travel only as flags on the key events, never as key events of their
+    // own: posting Command down/up would rewrite the session's modifier state under a
+    // user still holding Command. The device bits mark the left-hand key, as hardware does.
     var flags = CGEventFlags()
-
-    // Identify and set modifier flags
+    var keys: [CGKeyCode] = []
     for keyCode in keyCodes {
         switch keyCode {
         case 55:  // Command key
-            flags.insert(.maskCommand)
+            flags.insert([.maskCommand, CGEventFlags(rawValue: 0x08)])
         case 56:  // Shift key
-            flags.insert(.maskShift)
+            flags.insert([.maskShift, CGEventFlags(rawValue: 0x02)])
         case 58:  // Option key
-            flags.insert(.maskAlternate)
+            flags.insert([.maskAlternate, CGEventFlags(rawValue: 0x20)])
         case 59:  // Control key
-            flags.insert(.maskControl)
+            flags.insert([.maskControl, CGEventFlags(rawValue: 0x01)])
         default:
-            break
+            keys.append(CGKeyCode(UInt16(keyCode)))
         }
     }
 
-    for keyCode in keyCodes {
-        if let keyDown = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(UInt16(keyCode)), keyDown: true) {
+    let source = CGEventSource(stateID: .combinedSessionState)
+    // Hold back the user's own key presses while the shortcut goes out, so they
+    // cannot slip in between and change it
+    source?.setLocalEventsFilterDuringSuppressionState(
+        [.permitLocalMouseEvents, .permitSystemDefinedEvents],
+        state: .eventSuppressionStateSuppressionInterval
+    )
+
+    for keyCode in keys {
+        if let keyDown = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true) {
             keyDown.flags = flags
             keyDown.post(tap: .cghidEventTap)
         }
     }
 
-    for keyCode in keyCodes.reversed() {
-        if let keyUp = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(UInt16(keyCode)), keyDown: false) {
-            keyUp.flags = []
+    for keyCode in keys.reversed() {
+        if let keyUp = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false) {
+            keyUp.flags = flags
             keyUp.post(tap: .cghidEventTap)
         }
     }

@@ -3,6 +3,7 @@ package com.crosspaste.ui.settings
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -25,15 +26,18 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import com.composables.icons.materialsymbols.MaterialSymbols
+import com.composables.icons.materialsymbols.rounded.Content_paste
 import com.composables.icons.materialsymbols.rounded.Docs
 import com.composables.icons.materialsymbols.rounded.Power
 import com.composables.icons.materialsymbols.rounded.Shield
+import com.composables.icons.materialsymbols.rounded.Sync
 import com.composables.icons.materialsymbols.rounded.Sync_alt
 import com.composables.icons.materialsymbols.rounded.Visibility
 import com.crosspaste.config.CommonConfigManager
 import com.crosspaste.dto.sync.SyncInfo
 import com.crosspaste.i18n.GlobalCopywriter
 import com.crosspaste.net.NetworkInterfaceService
+import com.crosspaste.ui.LocalScrollContentBottomPadding
 import com.crosspaste.ui.LocalSmallSettingItemState
 import com.crosspaste.ui.LocalThemeExtState
 import com.crosspaste.ui.base.Counter
@@ -92,6 +96,7 @@ fun NetworkSettingsContentView(syncExtContent: @Composable () -> Unit = {}) {
 
     LazyColumn(
         modifier = Modifier.fillMaxWidth(),
+        contentPadding = PaddingValues(bottom = LocalScrollContentBottomPadding.current),
         verticalArrangement = Arrangement.spacedBy(tiny),
     ) {
         item {
@@ -225,6 +230,24 @@ fun NetworkSettingsContentView(syncExtContent: @Composable () -> Unit = {}) {
                             }
                         },
                     )
+                }
+                HorizontalDivider(modifier = Modifier.padding(start = xxxxLarge))
+                SettingListSwitchItem(
+                    title = "auto_pull_missed_pastes",
+                    icon = IconData(MaterialSymbols.Rounded.Sync, themeExt.blueIconColor),
+                    checked = config.enableAutoPastePull,
+                ) { enableAutoPastePull ->
+                    configManager.updateConfig("enableAutoPastePull", enableAutoPastePull)
+                }
+                DependentSettings(visible = config.enableAutoPastePull) {
+                    HorizontalDivider(modifier = Modifier.padding(start = xxxxLarge))
+                    SettingListSwitchItem(
+                        title = "auto_pull_write_clipboard",
+                        icon = IconData(MaterialSymbols.Rounded.Content_paste, themeExt.purpleIconColor),
+                        checked = config.enableAutoPullWriteClipboard,
+                    ) { enableAutoPullWriteClipboard ->
+                        configManager.updateConfig("enableAutoPullWriteClipboard", enableAutoPullWriteClipboard)
+                    }
                 }
                 syncExtContent()
             }

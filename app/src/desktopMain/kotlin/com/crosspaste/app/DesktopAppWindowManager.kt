@@ -6,24 +6,32 @@ import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.window.WindowPosition
 import androidx.compose.ui.window.WindowState
 import com.crosspaste.config.DesktopConfigManager
+import com.crosspaste.listener.DesktopShortcutKeys.Companion.PASTE
 import com.crosspaste.listener.ShortcutKeys
 import com.crosspaste.listener.ShortcutKeysAction
 import com.crosspaste.listener.ShortcutKeysListener
+import com.crosspaste.notification.MessageType
 import com.crosspaste.notification.NotificationManager
 import com.crosspaste.path.UserDataPathProvider
 import com.crosspaste.platform.Platform
+import com.crosspaste.ui.DesktopDisplayScale.toWindowUnits
 import com.crosspaste.utils.GlobalCoroutineScope.mainCoroutineDispatcher
 import com.crosspaste.utils.ioDispatcher
 import com.crosspaste.utils.namedScope
+import com.crosspaste.utils.pollUntil
 import io.github.oshai.kotlinlogging.KLogger
 import io.github.oshai.kotlinlogging.KotlinLogging
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import okio.Path
 import java.awt.Frame
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
 
 fun getDesktopAppWindowManager(
     appInfo: AppInfo,
@@ -43,6 +51,7 @@ fun getDesktopAppWindowManager(
             lazyConfigManager,
             lazyShortcutKeys,
             lazyShortcutKeysListener,
+            lazyNotificationManager,
             userDataPathProvider,
         )
     } else if (platform.isWindows()) {
@@ -51,6 +60,7 @@ fun getDesktopAppWindowManager(
             appSize,
             lazyShortcutKeys,
             lazyShortcutKeysListener,
+            lazyNotificationManager,
             userDataPathProvider,
         )
     } else if (platform.isLinux()) {
@@ -101,6 +111,10 @@ abstract class DesktopAppWindowManager(
 
         private const val PASTE_PANEL_BUTTON_WINDOW_TITLE = "CrossPaste Paste Panel Button"
         private const val PASTE_PANEL_MENU_WINDOW_TITLE = "CrossPaste Paste Panel Menu"
+
+        private val FOREGROUND_TIMEOUT = 1.seconds
+
+        private val FOREGROUND_POLL_INTERVAL = 10.milliseconds
     }
 
     protected val logger: KLogger = KotlinLogging.logger {}
@@ -186,6 +200,24 @@ abstract class DesktopAppWindowManager(
 
     abstract suspend fun focusBubbleWindow()
 
+    /** Brings the already visible bubble back to the front with the keyboard focus. */
+    open suspend fun raiseBubbleWindow() {
+        focusBubbleWindow()
+    }
+
+    private val _bubbleAttentionRequests = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+
+    /**
+     * Emits when the user tries to use the search window while the bubble is open: the
+     * bubble is modal, so it comes back to the front and flashes to show it must be
+     * handled or closed first.
+     */
+    val bubbleAttentionRequests: SharedFlow<Unit> = _bubbleAttentionRequests
+
+    fun requestBubbleAttention() {
+        _bubbleAttentionRequests.tryEmit(Unit)
+    }
+
     // The paste panel and its floating button are non-activating windows: they never
     // take focus away from the app the user is pasting into, so unlike the search
     // window they need no previous-app bookkeeping and no platform focus hand-off.
@@ -221,14 +253,15 @@ abstract class DesktopAppWindowManager(
 
     /** Applies a new button size from the appearance settings, keeping the top-left corner. */
     fun resizePastePanelButton(size: Dp) {
+        val windowSize = size.toWindowUnits()
         _pastePanelButtonInfo.update { current ->
-            if (current.state.size.width == size) return
+            if (current.state.size.width == windowSize) return
             current.copy(
                 state =
                     WindowState(
                         placement = current.state.placement,
                         position = current.state.position,
-                        size = DpSize(size, size),
+                        size = DpSize(windowSize, windowSize),
                     ),
             )
         }
@@ -439,6 +472,40 @@ abstract class DesktopAppWindowManager(
     )
 
     abstract fun getPrevAppName(): Flow<String?>
+
+    /**
+     * Waits for the app the user is pasting into to come back to the foreground:
+     * activation is asynchronous, and a keystroke injected before it completes lands
+     * in whichever app holds the focus at that moment.
+     */
+    protected suspend fun awaitForeground(isForeground: () -> Boolean): Boolean {
+        val foreground = pollUntil(FOREGROUND_TIMEOUT, FOREGROUND_POLL_INTERVAL, isForeground)
+        if (!foreground) {
+            logger.warn { "Previous app did not return to the foreground within $FOREGROUND_TIMEOUT" }
+        }
+        return foreground
+    }
+
+    /**
+     * Last resort when the paste keystroke cannot be delivered to the right app. The
+     * content is already on the clipboard by this point, so say so and let the user
+     * paste it.
+     */
+    protected fun notifyManualPasteRequired(
+        notificationManager: NotificationManager,
+        shortcutKeys: ShortcutKeys,
+    ) {
+        logger.info { "No way to deliver the paste, asking the user to paste manually" }
+        val pasteShortcut =
+            shortcutKeys.shortcutKeysCore.value.keys[PASTE]
+                ?.joinToString("+") { it.name }
+                ?: ""
+        notificationManager.sendNotification(
+            title = { it.getText("copy_successful") },
+            message = { it.getText("paste_manually_required", pasteShortcut) },
+            messageType = MessageType.Info,
+        )
+    }
 
     protected open fun onMainComposeWindowChanged(window: ComposeWindow?) {}
 
