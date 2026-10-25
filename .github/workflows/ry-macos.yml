@@ -81,6 +81,8 @@ jobs:
       - name: Check base tag and version
         run: |
           . ry/fork.env
+          # The fork does not receive upstream tags created after it was forked
+          git fetch --no-tags https://github.com/CrossPaste/crosspaste-desktop.git "+refs/tags/$UPSTREAM_TAG:refs/tags/$UPSTREAM_TAG"
           git merge-base --is-ancestor "refs/tags/$UPSTREAM_TAG" HEAD || { echo "HEAD is not based on $UPSTREAM_TAG"; exit 1; }
           if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "${UPSTREAM_TAG}-ry.${FORK_REV}" ]; then
             echo "tag $GITHUB_REF_NAME does not match ry/fork.env (${UPSTREAM_TAG}-ry.${FORK_REV})"; exit 1
